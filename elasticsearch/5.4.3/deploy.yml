@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-cluster-prod
+spec:
+  clusterIP: None
+  selector:
+    app: es-cluster-prod
+  ports:
+  - name: transport
+    port: 9300
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-prod-loadbalancer
+spec:
+  selector:
+    app: es-cluster-prod
+  ports:
+  - name: http
+    port: 80
+    targetPort: 9200
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: es-config-prod
+data:
+  elasticsearch.yml: |
+    cluster.name: my-elastic-cluster
+    network.host: "0.0.0.0"
+    bootstrap.memory_lock: false
+    discovery.zen.ping.unicast.hosts: elasticsearch-cluster-prod
+    discovery.zen.minimum_master_nodes: 1
+    xpack.security.enabled: false
+    xpack.monitoring.enabled: false
+  ES_JAVA_OPTS: -Xms512m -Xmx512m
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: esnode-prod
+spec:
+  serviceName: elasticsearch
+  replicas: 2
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: es-cluster-prod
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: init-sysctl
+        image: busybox
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        command: ["sysctl", "-w", "vm.max_map_count=262144"]
+      containers:
+      - name: elasticsearch
+        # resources:
+        #     requests:
+        #         memory: 1Gi
+        securityContext:
+          privileged: true
+          runAsUser: 1000
+          capabilities:
+            add:
+            - IPC_LOCK
+            - SYS_RESOURCE
+        image: docker.elastic.co/elasticsearch/elasticsearch:5.4.3
+        env:
+        - name: ES_JAVA_OPTS
+          valueFrom:
+              configMapKeyRef:
+                  name: es-config-prod
+                  key: ES_JAVA_OPTS
+        readinessProbe:
+          httpGet:
+            scheme: HTTP
+            path: /_cluster/health?local=true
+            port: 9200
+          initialDelaySeconds: 5
+        ports:
+        - containerPort: 9200
+          name: es-http
+        - containerPort: 9300
+          name: es-transport
+        volumeMounts:
+        - name: es-prod-data
+          mountPath: /usr/share/elasticsearch/data
+        - name: elasticsearch-config
+          mountPath: /usr/share/elasticsearch/config/elasticsearch.yml
+          subPath: elasticsearch.yml
+      volumes:
+        - name: elasticsearch-config
+          configMap:
+            name: es-config-prod
+            items:
+              - key: elasticsearch.yml
+                path: elasticsearch.yml
+        # - name: cache-voluoe
+        #   emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: es-prod-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 25Gi
